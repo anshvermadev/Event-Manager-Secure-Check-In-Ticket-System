@@ -111,6 +111,114 @@ This project requires Firestore to store data. Create the following three collec
 
 ---
 
+## 🔄 System Architecture & Data Flow
+
+This application is built as a serverless event entry ecosystem connecting client-side ticket designer/rendering tools, CDN storage engines, email delivery APIs, and a real-time Firestore database.
+
+### 📐 High-Level Architecture & Flow
+
+```mermaid
+graph TD
+    %% Roles
+    Admin[Admin Panel]
+    Attendee[Attendee User]
+    Manager[Gate Manager Panel]
+
+    %% Main DB & APIs
+    subgraph Firebase Backend
+        Firestore[(Firestore DB)]
+        Auth[Firebase Auth]
+    end
+
+    subgraph External Integrations
+        EmailJS[EmailJS SMTP API]
+        FreeImage[FreeImage.host API]
+    end
+
+    %% Admin Flow
+    Admin -->|1. Create Event & Set Positions| Firestore
+    Admin -->|2. Bulk Import Attendees CSV| Firestore
+    Admin -->|3. Generate passes HTML5 Canvas| FreeImage
+    FreeImage -->|4. Upload & Return CDN URL| Firestore
+    Admin -->|5. Trigger Email Broadcast| EmailJS
+
+    %% Email & Verify Flow
+    EmailJS -->|6. Send secure verify URL| Attendee
+    Attendee -->|7. Enter Email Challenge| VerifyPortal[Verify Pass Page /verify-pass]
+    VerifyPortal -->|8. Match token against database| Firestore
+    VerifyPortal -->|9. Fetch & Download Pass PNG| Attendee
+
+    %% Check-In Flow
+    Attendee -->|10. Present QR code at Gate| Manager
+    Manager -->|11. Scan QR with Camera /manager| LiveVerify[Firestore Validation]
+    LiveVerify -->|12. Log Check-In/Out Timestamp| Firestore
+```
+
+### 🗄️ Database Schema & Relationships
+
+1. **`events` (Collection)**: Stores core event rules, layouts, and configurations.
+   - `id`: Event Unique ID
+   - `name`, `date`, `time`: Event metadata
+   - `status`: `'active'` | `'inactive'`
+   - `passTemplateURL`: Background template image path
+   - `qrPosition`: Object `{ x, y, size, color, bgColor, rotation }`
+   - `namePosition`: Object `{ x, y, size, color, font, rotation }`
+
+2. **`events/{eventId}/users` (Subcollection)**: Stores attendee list for a specific event.
+   - `id`: Attendee Unique ID
+   - `name`, `email`, `branch`, `year`, `section`: Guest details
+   - `verificationToken`: Secure UUID used for download authorization
+   - `passURL`: Direct public URL to the generated pass image
+   - `passConfigHash`: JSON string hash of configuration when generated (helps avoid redundant canvas re-renders)
+   - `emailSent`: Boolean indicating if the ticket has been emailed
+
+3. **`attendance/{eventId}/users/{userId}` (Collection)**: Stores gate logs for event audit.
+   - `checkInTime`: Firestore ServerTimestamp
+   - `checkOutTime`: Firestore ServerTimestamp or `null`
+
+---
+
+## 📩 Ticket Distribution & Verification
+
+The tickets are generated and distributed programmatically via browser-side operations and third-party APIs:
+
+1. **Pass Rendering**: The system reads the event canvas layout parameters. It instantiates an **HTML5 Canvas**, draws the template background, parses and positions the attendee's name (supporting scaling, custom fonts, color values, and rotation offsets), and constructs a custom QR code containing the payload format: `${eventId}_${userId}`.
+2. **CORS Safe CDN Upload**: The resulting Canvas layout is converted into a PNG `Blob`. To bypass browser CORS constraints, this is POSTed to the local api proxy `/api/upload` which securely appends credentials and forwards the image to the `FreeImage.host` API to obtain a direct CDN image path.
+3. **Email Broadcasting**: Triggering the mail client utilizes `@emailjs/browser` directly in the browser using the public API key. It fires custom event email templates carrying verification links:
+   `https://<domain>/verify-pass?token=<token>&eventId=<eventId>`
+   *An artificial 500ms delay is executed between batch emails to prevent SMTP API rate-limiting.*
+4. **Pass Retrieval & Email Validation**: When an attendee opens their link, they must enter their registered email address. This ensures that even if a link is intercepted, only the authorized attendee can access the download page to obtain their high-resolution pass.
+
+---
+
+## 👥 UX Flow (User Journeys)
+
+```
+[ ADMIN JOURNEY ]
+   Create Event -> Visual Canvas Setup -> CSV Attendee Import -> Batch Generate -> Send Emails -> Monitor Counters & Export Log
+
+[ ATTENDEE JOURNEY ]
+   Open Email Invite -> Complete Secure Verification -> Preview/Download Pass PNG -> Present QR Code at Entry Gate
+
+[ GATE MANAGER JOURNEY ]
+   Select Active Event -> Scan QR Code -> View Attendee Profile/Status -> Tap Check-In / Check-Out -> Live Counter Sync
+```
+
+### 1. The Admin Experience
+* **Visual Setup**: Admin uploads a template (e.g., ticket poster) and moves drag-and-drop handles to visually align where the Guest Name and QR Code will be printed.
+* **Bulk Upload**: Import hundreds of guest rows via CSV/Excel in seconds.
+* **Smart Generation**: The dashboard shows a "Pass Status" indicator. Clicking "Generate Passes" skips existing valid passes and only builds passes for newly added attendees or if design parameters are modified (detected via config hashing).
+
+### 2. The Attendee Experience
+* **Zero-Login Access**: Guests do not need to register accounts. The verification link utilizes the Firestore document ID and UUID verification token to grant direct, secure access to the event ticket.
+* **Verification Challenge**: Simple validation step verifies identity by prompting the guest for their email before exposing the ticket file download.
+
+### 3. The Gate Staff Experience
+* **Real-time Live Sync**: Multiple managers can scan simultaneously at separate gates. As check-ins are logged, the active headcount counter updates in real time on all manager dashboards using Firestore `onSnapshot` subscriptions.
+* **Double-Scan Protection**: The scanner parses the QR payload. If a ticket has already been checked in, it alerts the gate keeper of their current state and prompts for checkout, preventing reuse of identical tickets.
+
+---
+
 ## 🤝 Contribution Guidelines
 
 Contributions are welcome! Please read our [CONTRIBUTING.md](CONTRIBUTING.md) to learn how to propose changes, report bugs, or submit pull requests.
